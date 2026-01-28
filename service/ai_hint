@@ -1,0 +1,92 @@
+#!/bin/bash
+#
+# Batocera AI Hint System Service
+#
+# Installation:
+#   1. Copy this file to /userdata/system/services/ai_hint
+#   2. Copy daemon.py to /userdata/system/ai-hints/daemon.py
+#   3. Copy config.json to /userdata/system/ai-hints/config.json
+#   4. Edit config.json with your API key
+#   5. Reboot or run: batocera-services start ai_hint
+#
+# Note: File must have UNIX line endings (LF, not CRLF)
+#       Filename must not have .sh extension
+
+DAEMON_PATH="/userdata/system/ai-hints/daemon.py"
+CONFIG_PATH="/userdata/system/ai-hints/config.json"
+PID_FILE="/var/run/ai_hint.pid"
+LOG_FILE="/userdata/system/ai-hints/daemon.log"
+
+start() {
+    if [ -f "$PID_FILE" ] && kill -0 $(cat "$PID_FILE") 2>/dev/null; then
+        echo "AI Hint daemon already running"
+        return 1
+    fi
+
+    if [ ! -f "$DAEMON_PATH" ]; then
+        echo "Daemon not found: $DAEMON_PATH"
+        return 1
+    fi
+
+    if [ ! -f "$CONFIG_PATH" ]; then
+        echo "Config not found: $CONFIG_PATH"
+        echo "Creating default config..."
+        mkdir -p "$(dirname "$CONFIG_PATH")"
+        # Daemon will create default config on first run
+    fi
+
+    echo "Starting AI Hint daemon..."
+    python3 "$DAEMON_PATH" "$CONFIG_PATH" >> "$LOG_FILE" 2>&1 &
+    echo $! > "$PID_FILE"
+    echo "Started with PID $(cat $PID_FILE)"
+}
+
+stop() {
+    if [ -f "$PID_FILE" ]; then
+        PID=$(cat "$PID_FILE")
+        if kill -0 "$PID" 2>/dev/null; then
+            echo "Stopping AI Hint daemon (PID $PID)..."
+            kill "$PID"
+            rm -f "$PID_FILE"
+            echo "Stopped"
+        else
+            echo "Process not running, cleaning up PID file"
+            rm -f "$PID_FILE"
+        fi
+    else
+        # Try to find and kill by name
+        pkill -f "daemon.py.*config.json" 2>/dev/null
+        echo "Stopped (by name)"
+    fi
+}
+
+status() {
+    if [ -f "$PID_FILE" ] && kill -0 $(cat "$PID_FILE") 2>/dev/null; then
+        echo "running"
+    else
+        echo "stopped"
+    fi
+}
+
+case "$1" in
+    start)
+        start
+        ;;
+    stop)
+        stop
+        ;;
+    restart)
+        stop
+        sleep 1
+        start
+        ;;
+    status)
+        status
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|status}"
+        exit 1
+        ;;
+esac
+
+exit 0

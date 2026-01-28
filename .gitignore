@@ -205,3 +205,29 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# ===========================================
+# AI Hint System - Sensitive Files
+# ===========================================
+
+# API keys and secrets
+secrets.json
+*.secret
+.api_key
+
+# Local config with API keys (use config.example.json as template)
+src/config.local.json
+config.local.json
+
+# Logs
+*.log
+daemon.log
+usage.log
+usage_counter.json
+
+# Generated hints (can be large)
+current-hint.png
+archive/
+
+# Claude Code settings
+.claude/
