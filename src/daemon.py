@@ -77,12 +77,14 @@ Provide only the hint text, no preamble.""",
 
 
 class Config:
-    """Configuration manager"""
+    """Configuration manager with secure API key handling"""
 
     def __init__(self, config_path: str):
         self.config_path = Path(config_path)
+        self.secrets_path = self.config_path.parent / ".secrets"
         self.data = DEFAULT_CONFIG.copy()
         self.load()
+        self._load_api_key()
 
     def load(self):
         """Load config from file, create default if not exists"""
@@ -98,11 +100,53 @@ class Config:
             self.save()
             log(f"Created default config at {self.config_path}")
 
+    def _load_api_key(self):
+        """
+        Load API key securely. Priority order:
+        1. Environment variable (ANTHROPIC_API_KEY or OPENAI_API_KEY)
+        2. Secrets file (.secrets in hints directory)
+        3. Config file (least secure, not recommended)
+        """
+        provider = self.data.get("api_provider", "anthropic")
+
+        # 1. Try environment variable first (most secure)
+        env_var = "ANTHROPIC_API_KEY" if provider == "anthropic" else "OPENAI_API_KEY"
+        env_key = os.environ.get(env_var)
+        if env_key:
+            self.data["api_key"] = env_key
+            log(f"API key loaded from environment variable {env_var}")
+            return
+
+        # 2. Try secrets file (secure - restricted permissions)
+        if self.secrets_path.exists():
+            try:
+                with open(self.secrets_path, 'r') as f:
+                    for line in f:
+                        line = line.strip()
+                        if line and not line.startswith('#'):
+                            if '=' in line:
+                                key, value = line.split('=', 1)
+                                if key.strip() == "API_KEY":
+                                    self.data["api_key"] = value.strip()
+                                    log(f"API key loaded from {self.secrets_path}")
+                                    return
+            except Exception as e:
+                log(f"Error reading secrets file: {e}", error=True)
+
+        # 3. Fall back to config file (not recommended)
+        if self.data.get("api_key") and self.data["api_key"] != "YOUR_API_KEY_HERE":
+            log("API key loaded from config.json (consider using .secrets file instead)", error=False)
+        else:
+            log("No API key found! Set ANTHROPIC_API_KEY env var or create .secrets file", error=True)
+
     def save(self):
-        """Save current config to file"""
+        """Save current config to file (excludes API key for security)"""
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
+        # Don't save API key to config file
+        save_data = {k: v for k, v in self.data.items() if k != "api_key"}
+        save_data["api_key"] = ""  # Placeholder
         with open(self.config_path, 'w') as f:
-            json.dump(self.data, f, indent=2)
+            json.dump(save_data, f, indent=2)
 
     def get(self, key: str, default=None):
         return self.data.get(key, default)
@@ -435,11 +479,12 @@ class RetroArchCommander:
 
             if len(parts) >= 3:
                 content_info = " ".join(parts[2:])
-                # Split on comma - content_name,core_name
+                # Format is: core,content,crc32 (e.g., commodore_amiga,GameName,crc32=xxxx)
                 if "," in content_info:
-                    content_parts = content_info.rsplit(",", 1)
-                    result["content"] = content_parts[0]
-                    result["core"] = content_parts[1] if len(content_parts) > 1 else ""
+                    content_parts = content_info.split(",", 2)
+                    result["core"] = content_parts[0]
+                    result["content"] = content_parts[1] if len(content_parts) > 1 else ""
+                    # crc32 is in content_parts[2] if present, but we don't need it
                 else:
                     result["content"] = content_info
 
@@ -555,6 +600,18 @@ class GameInfoParser:
         "fbneo": "Arcade",
         "dosbox_pure": "DOS",
         "scummvm": "ScummVM",
+        # Amiga cores
+        "puae": "Amiga",
+        "commodore_amiga": "Amiga",
+        "fsuae": "Amiga",
+        # Commodore 64
+        "vice": "C64",
+        "vice_x64": "C64",
+        # Other systems
+        "hatari": "Atari ST",
+        "px68k": "X68000",
+        "quasi88": "PC-88",
+        "np2kai": "PC-98",
     }
 
     @classmethod
@@ -743,12 +800,32 @@ class HintRenderer:
         """Render hint text to PNG image, return path"""
         hints_dir = Path(self.config["hints_dir"])
         output_path = hints_dir / "current-hint.png"
+        text_path = hints_dir / "current-hint.txt"
         hints_dir.mkdir(parents=True, exist_ok=True)
 
+        # Always save text version for OSD fallback display
+        with open(text_path, 'w') as f:
+            f.write(f"{system} - {game}\n\n{hint_text}")
+
         if PIL_AVAILABLE:
-            return self._render_pil(hint_text, game, system, output_path)
+            result = self._render_pil(hint_text, game, system, output_path)
         else:
-            return self._render_fallback(hint_text, game, system, output_path)
+            result = self._render_fallback(hint_text, game, system, output_path)
+
+        # Also save to screenshots folder as backup (viewable in Batocera GUI)
+        try:
+            screenshots_dir = Path(self.config["screenshot_dir"])
+            if screenshots_dir.exists():
+                import shutil
+                safe_game = "".join(c if c.isalnum() or c in "._-" else "_" for c in game)[:30]
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                backup_path = screenshots_dir / f"HINT_{safe_game}_{timestamp}.png"
+                shutil.copy2(output_path, backup_path)
+                log(f"Hint backup saved to {backup_path}")
+        except Exception as e:
+            log_debug(f"Could not save hint backup: {e}")
+
+        return result
 
     def _render_pil(self, hint_text: str, game: str, system: str, output_path: Path) -> Path:
         """Render using PIL/Pillow"""
@@ -942,6 +1019,40 @@ class HintViewer:
 
     def _detect_display_method(self):
         """Detect available display method"""
+        # Check for direct framebuffer access (most reliable on KMS/DRM systems)
+        # We use PIL to write directly to /dev/fb0, bypassing tools that can't get DRM master
+        if PIL_AVAILABLE:
+            try:
+                # Check if framebuffer device exists and we can read its properties
+                fb_size = Path('/sys/class/graphics/fb0/virtual_size')
+                fb_bpp = Path('/sys/class/graphics/fb0/bits_per_pixel')
+                if fb_size.exists() and fb_bpp.exists():
+                    self.display_method = "direct_fb"
+                    log("Display method: direct_fb (PIL + /dev/fb0)")
+                    return
+            except:
+                pass
+
+        # Check for mpv - works with KMS/DRM if it can get DRM master
+        try:
+            result = subprocess.run(["which", "mpv"], capture_output=True)
+            if result.returncode == 0:
+                self.display_method = "mpv"
+                log("Display method: mpv (DRM output)")
+                return
+        except:
+            pass
+
+        # Check for fbv (framebuffer viewer) - fallback for non-KMS systems
+        try:
+            result = subprocess.run(["which", "fbv"], capture_output=True)
+            if result.returncode == 0:
+                self.display_method = "fbv"
+                log("Display method: fbv (framebuffer viewer)")
+                return
+        except:
+            pass
+
         # Check for fbi (framebuffer image viewer)
         try:
             result = subprocess.run(["which", "fbi"], capture_output=True)
@@ -971,12 +1082,392 @@ class HintViewer:
         Display hint image and wait for dismissal.
         Returns True when user dismisses the hint.
         """
-        if self.display_method == "fbi":
+        if self.display_method == "direct_fb":
+            return self._show_direct_fb(hint_path)
+        elif self.display_method == "fbv":
+            return self._show_fbv(hint_path)
+        elif self.display_method == "mpv":
+            return self._show_mpv(hint_path)
+        elif self.display_method == "fbi":
             return self._show_fbi(hint_path)
         elif self.display_method == "feh":
             return self._show_feh(hint_path)
         else:
             return self._show_retroarch_pause(hint_path)
+
+    def _show_direct_fb(self, hint_path: Path) -> bool:
+        """
+        Write image directly to Linux framebuffer using PIL.
+        This bypasses external tools and works on KMS/DRM systems by:
+        1. Stopping RetroArch (freezes it but doesn't release DRM)
+        2. Switching to text VT (triggers fbcon to take over display)
+        3. Writing image directly to /dev/fb0
+        4. Waiting for button press
+        5. Switching back and resuming RetroArch
+        """
+        current_vt = None
+        display_vt = None
+        retroarch_suspended = False
+        fb_data_backup = None
+
+        try:
+            log(f"Displaying hint with direct framebuffer: {hint_path}")
+
+            # 1. Read framebuffer properties from sysfs
+            try:
+                with open('/sys/class/graphics/fb0/virtual_size', 'r') as f:
+                    fb_size = f.read().strip()
+                    fb_width, fb_height = map(int, fb_size.split(','))
+                with open('/sys/class/graphics/fb0/bits_per_pixel', 'r') as f:
+                    fb_bpp = int(f.read().strip())
+                log_debug(f"Framebuffer: {fb_width}x{fb_height} @ {fb_bpp}bpp")
+            except Exception as e:
+                log(f"Could not read framebuffer properties: {e}", error=True)
+                return self._show_retroarch_pause(hint_path)
+
+            # 2. Get current VT
+            try:
+                result = subprocess.run(["fgconsole"], capture_output=True, text=True)
+                if result.returncode == 0 and result.stdout.strip():
+                    current_vt = result.stdout.strip()
+                    log_debug(f"Current VT: {current_vt}")
+            except Exception as e:
+                log_debug(f"Could not get current VT: {e}")
+
+            # 3. Stop RetroArch
+            try:
+                subprocess.run(["pkill", "-STOP", "retroarch"], capture_output=True)
+                retroarch_suspended = True
+                log_debug("RetroArch suspended")
+                time.sleep(0.3)
+            except Exception as e:
+                log_debug(f"Could not suspend RetroArch: {e}")
+
+            # 4. Switch to a text VT to activate fbcon
+            # This is crucial - fbcon takes over display when we switch to a text VT
+            try:
+                display_vt = "1" if current_vt != "1" else "3"
+                subprocess.run(["chvt", display_vt], capture_output=True)
+                log_debug(f"Switched to VT{display_vt}")
+                time.sleep(0.5)  # Give fbcon time to take over
+            except Exception as e:
+                log_debug(f"Could not switch VT: {e}")
+
+            # 5. Load and prepare image with PIL
+            try:
+                img = Image.open(hint_path)
+                img = img.convert('RGB')  # Ensure RGB mode
+
+                # Resize to fit framebuffer while maintaining aspect ratio
+                img_ratio = img.width / img.height
+                fb_ratio = fb_width / fb_height
+
+                if img_ratio > fb_ratio:
+                    # Image is wider - fit to width
+                    new_width = fb_width
+                    new_height = int(fb_width / img_ratio)
+                else:
+                    # Image is taller - fit to height
+                    new_height = fb_height
+                    new_width = int(fb_height * img_ratio)
+
+                img = img.resize((new_width, new_height), Image.LANCZOS)
+
+                # Create a black background and paste centered image
+                canvas = Image.new('RGB', (fb_width, fb_height), (0, 0, 0))
+                x_offset = (fb_width - new_width) // 2
+                y_offset = (fb_height - new_height) // 2
+                canvas.paste(img, (x_offset, y_offset))
+
+                # Convert to framebuffer format
+                if fb_bpp == 32:
+                    # BGRA format (most common for 32bpp framebuffers)
+                    canvas = canvas.convert('RGBA')
+                    r, g, b, a = canvas.split()
+                    canvas = Image.merge('RGBA', (b, g, r, a))
+                    raw_data = canvas.tobytes()
+                elif fb_bpp == 24:
+                    # BGR format
+                    r, g, b = canvas.split()
+                    canvas = Image.merge('RGB', (b, g, r))
+                    raw_data = canvas.tobytes()
+                elif fb_bpp == 16:
+                    # RGB565 format - need manual conversion
+                    raw_data = self._convert_to_rgb565(canvas)
+                else:
+                    log(f"Unsupported framebuffer depth: {fb_bpp}bpp", error=True)
+                    return self._show_retroarch_pause(hint_path)
+
+                log_debug(f"Image prepared: {new_width}x{new_height}, {len(raw_data)} bytes")
+
+            except Exception as e:
+                log(f"Image preparation failed: {e}", error=True)
+                return self._show_retroarch_pause(hint_path)
+
+            # 6. Write to framebuffer
+            try:
+                with open('/dev/fb0', 'r+b') as fb:
+                    # Optionally backup current framebuffer content
+                    # fb_data_backup = fb.read(len(raw_data))
+                    # fb.seek(0)
+                    fb.write(raw_data)
+                    fb.flush()
+                log_debug("Image written to framebuffer")
+            except PermissionError:
+                log("Permission denied writing to /dev/fb0 - need root", error=True)
+                return self._show_retroarch_pause(hint_path)
+            except Exception as e:
+                log(f"Framebuffer write failed: {e}", error=True)
+                return self._show_retroarch_pause(hint_path)
+
+            # 7. Wait for button press
+            log_debug("Waiting for button press to dismiss hint...")
+            if EVDEV_AVAILABLE:
+                self._wait_for_button_press(timeout=300)
+            else:
+                time.sleep(10)  # Fallback: just wait 10 seconds
+
+            log_debug("Button pressed, restoring display...")
+
+            # 8. Switch back to original VT
+            if current_vt:
+                try:
+                    subprocess.run(["chvt", current_vt], capture_output=True)
+                    log_debug(f"Switched back to VT{current_vt}")
+                    time.sleep(0.3)
+                except Exception as e:
+                    log_debug(f"Could not switch back to VT: {e}")
+
+            # 9. Resume RetroArch
+            if retroarch_suspended:
+                subprocess.run(["pkill", "-CONT", "retroarch"], capture_output=True)
+                log_debug("RetroArch resumed")
+
+            return True
+
+        except Exception as e:
+            log(f"Direct framebuffer display failed: {e}", error=True)
+            # Cleanup
+            try:
+                if current_vt:
+                    subprocess.run(["chvt", current_vt], capture_output=True)
+                if retroarch_suspended:
+                    subprocess.run(["pkill", "-CONT", "retroarch"], capture_output=True)
+            except:
+                pass
+            return self._show_retroarch_pause(hint_path)
+
+    def _convert_to_rgb565(self, img: 'Image.Image') -> bytes:
+        """Convert PIL Image to RGB565 format for 16bpp framebuffers"""
+        import struct
+        pixels = list(img.getdata())
+        raw = []
+        for r, g, b in pixels:
+            # RGB565: 5 bits red, 6 bits green, 5 bits blue
+            pixel = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)
+            raw.append(struct.pack('<H', pixel))
+        return b''.join(raw)
+
+    def _show_fbv(self, hint_path: Path) -> bool:
+        """Show using fbv framebuffer viewer with VT switching for KMS/DRM systems"""
+        current_vt = None
+        display_vt = None
+        retroarch_suspended = False
+
+        try:
+            log(f"Displaying hint with fbv: {hint_path}")
+
+            # 1. Get current virtual terminal
+            try:
+                result = subprocess.run(["fgconsole"], capture_output=True, text=True)
+                if result.returncode == 0 and result.stdout.strip():
+                    current_vt = result.stdout.strip()
+                    log_debug(f"Current VT: {current_vt}")
+            except Exception as e:
+                log_debug(f"Could not get current VT: {e}")
+
+            # 2. Suspend RetroArch to stop it from rendering
+            try:
+                subprocess.run(["pkill", "-STOP", "retroarch"], capture_output=True)
+                retroarch_suspended = True
+                log_debug("RetroArch suspended")
+                time.sleep(0.3)  # Give it time to stop
+            except Exception as e:
+                log_debug(f"Could not suspend RetroArch: {e}")
+
+            # 3. Switch to a DIFFERENT VT for display
+            # Batocera runs RetroArch on VT2, so we switch to VT1 for a clean framebuffer
+            # If we're on VT1, switch to VT3. The key is switching AWAY from RetroArch's VT.
+            try:
+                if current_vt == "1":
+                    display_vt = "3"
+                else:
+                    display_vt = "1"
+                subprocess.run(["chvt", display_vt], capture_output=True)
+                log_debug(f"Switched to VT{display_vt}")
+                time.sleep(0.3)
+            except Exception as e:
+                log_debug(f"Could not switch VT: {e}")
+
+            # 4. Clear the framebuffer and display image
+            # fbv options: -f (fit to screen), -i (no info), -c (clear screen)
+            process = subprocess.Popen(
+                ["fbv", "-c", "-f", "-i", str(hint_path)],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+
+            # 5. Wait for any controller input to dismiss
+            if EVDEV_AVAILABLE:
+                self._wait_for_button_press(timeout=300)
+                process.terminate()
+            else:
+                # Without evdev, wait for process or timeout
+                try:
+                    process.wait(timeout=300)
+                except subprocess.TimeoutExpired:
+                    process.terminate()
+
+            # 6. Switch back to original VT
+            if current_vt:
+                try:
+                    subprocess.run(["chvt", current_vt], capture_output=True)
+                    log_debug(f"Switched back to VT{current_vt}")
+                except Exception as e:
+                    log_debug(f"Could not switch back to VT: {e}")
+
+            # 7. Resume RetroArch
+            if retroarch_suspended:
+                subprocess.run(["pkill", "-CONT", "retroarch"], capture_output=True)
+                log_debug("RetroArch resumed")
+
+            return True
+        except FileNotFoundError:
+            log("fbv not found, falling back", error=True)
+            # Cleanup on error
+            if retroarch_suspended:
+                subprocess.run(["pkill", "-CONT", "retroarch"], capture_output=True)
+            return self._show_retroarch_pause(hint_path)
+        except Exception as e:
+            log(f"fbv display failed: {e}", error=True)
+            # Make sure to resume RetroArch and restore VT if we changed them
+            try:
+                if current_vt:
+                    subprocess.run(["chvt", current_vt], capture_output=True)
+                subprocess.run(["pkill", "-CONT", "retroarch"], capture_output=True)
+            except:
+                pass
+            return self._show_retroarch_pause(hint_path)
+
+    def _show_mpv(self, hint_path: Path) -> bool:
+        """Show using mpv media player with DRM output (works with KMS systems like Batocera)"""
+        retroarch_suspended = False
+
+        try:
+            log(f"Displaying hint with mpv: {hint_path}")
+
+            # 1. Suspend RetroArch so mpv can take over DRM output
+            try:
+                subprocess.run(["pkill", "-STOP", "retroarch"], capture_output=True)
+                retroarch_suspended = True
+                log_debug("RetroArch suspended for mpv display")
+                time.sleep(0.3)
+            except Exception as e:
+                log_debug(f"Could not suspend RetroArch: {e}")
+
+            # 2. Run mpv with DRM output
+            # mpv options for image display:
+            # --vo=drm: use direct rendering manager (takes over display)
+            # --image-display-duration=inf: keep image displayed
+            # --really-quiet: suppress output
+            # --no-osc: disable on-screen controller
+            # --no-input-default-bindings: disable keyboard shortcuts
+            log_debug("Starting mpv with DRM output...")
+            process = subprocess.Popen(
+                [
+                    "mpv",
+                    "--vo=drm",
+                    "--image-display-duration=inf",
+                    "--really-quiet",
+                    "--no-osc",
+                    "--no-input-default-bindings",
+                    str(hint_path)
+                ],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+
+            # Give mpv time to take over the display
+            time.sleep(0.5)
+            log_debug("Waiting for button press to dismiss hint...")
+
+            # 3. Wait for any controller input to dismiss
+            if EVDEV_AVAILABLE:
+                self._wait_for_button_press(timeout=300)
+                process.terminate()
+                log_debug("Button pressed, terminating mpv")
+            else:
+                # Without evdev, wait for process or timeout
+                try:
+                    process.wait(timeout=300)
+                except subprocess.TimeoutExpired:
+                    process.terminate()
+
+            # 4. Give mpv time to release DRM
+            time.sleep(0.3)
+
+            # 5. Resume RetroArch
+            if retroarch_suspended:
+                subprocess.run(["pkill", "-CONT", "retroarch"], capture_output=True)
+                log_debug("RetroArch resumed")
+
+            return True
+        except FileNotFoundError:
+            log("mpv not found, falling back", error=True)
+            if retroarch_suspended:
+                subprocess.run(["pkill", "-CONT", "retroarch"], capture_output=True)
+            return self._show_retroarch_pause(hint_path)
+        except Exception as e:
+            log(f"mpv display failed: {e}", error=True)
+            # Make sure to resume RetroArch
+            try:
+                subprocess.run(["pkill", "-CONT", "retroarch"], capture_output=True)
+            except:
+                pass
+            return self._show_retroarch_pause(hint_path)
+
+    def _wait_for_button_press(self, timeout: int = 300) -> bool:
+        """Wait for any button press on the controller"""
+        import select
+
+        try:
+            device_path = self.config["controller_device"]
+            device = evdev.InputDevice(device_path)
+            log_debug(f"Waiting for button press on {device.name}")
+
+            start_time = time.time()
+            while True:
+                elapsed = time.time() - start_time
+                if elapsed >= timeout:
+                    log_debug("Button wait timed out")
+                    return False
+
+                # Use select with remaining timeout
+                remaining = timeout - elapsed
+                r, w, x = select.select([device.fd], [], [], min(remaining, 1.0))
+
+                if device.fd in r:
+                    for event in device.read():
+                        # Any key press (value=1 is press, value=0 is release)
+                        if event.type == evdev.ecodes.EV_KEY and event.value == 1:
+                            log_debug(f"Button pressed: code={event.code}")
+                            return True
+
+        except Exception as e:
+            log_debug(f"Button wait error: {e}")
+            return False
 
     def _show_fbi(self, hint_path: Path) -> bool:
         """Show using framebuffer image viewer"""
@@ -1011,26 +1502,55 @@ class HintViewer:
 
     def _show_retroarch_pause(self, hint_path: Path) -> bool:
         """
-        Fallback: pause RetroArch and show message.
-        User manually views the hint file.
+        Fallback: pause RetroArch and show hint text via OSD.
+        Shows the hint text directly on screen.
         """
-        # Read hint text if it's a text file fallback
+        # Read hint text from companion text file
         hint_text = ""
         text_path = hint_path.with_suffix(".txt")
         if text_path.exists():
-            with open(text_path, "r") as f:
-                hint_text = f.read()[:200]  # Truncate for OSD
+            try:
+                with open(text_path, "r") as f:
+                    hint_text = f.read()
+            except Exception as e:
+                log(f"Error reading hint text: {e}", error=True)
 
         self.retroarch.pause()
 
         if hint_text:
-            # Show abbreviated hint via OSD
-            self.retroarch.show_message(hint_text)
-        else:
-            self.retroarch.show_message("Hint image ready. Check ai-hints folder.")
+            # Show hint text via OSD
+            # RetroArch OSD can handle ~100-150 chars per message
+            # Split into chunks and display with delays
+            log(f"Displaying hint via OSD: {hint_text[:50]}...")
 
-        # Wait for user to unpause manually
-        log("Hint displayed via RetroArch pause. Waiting for user to unpause.")
+            # Clean up text for OSD (remove newlines, extra spaces)
+            clean_text = " ".join(hint_text.split())
+
+            # Split into chunks of ~120 chars at word boundaries
+            chunks = []
+            words = clean_text.split()
+            current_chunk = ""
+            for word in words:
+                if len(current_chunk) + len(word) + 1 <= 120:
+                    current_chunk += (" " + word if current_chunk else word)
+                else:
+                    if current_chunk:
+                        chunks.append(current_chunk)
+                    current_chunk = word
+            if current_chunk:
+                chunks.append(current_chunk)
+
+            # Display each chunk with a delay
+            for i, chunk in enumerate(chunks):
+                self.retroarch.show_message(chunk)
+                time.sleep(4)  # Show each chunk for 4 seconds
+
+            # Final message
+            self.retroarch.show_message("Press Start to unpause and continue")
+        else:
+            self.retroarch.show_message("Hint ready - check ai-hints/current-hint.png")
+
+        log("Hint displayed via RetroArch OSD")
         time.sleep(2)
         return True
 
@@ -1360,10 +1880,10 @@ class HintSystem:
         slot = self.config["savestate_slot"]
         view_start = time.time()
 
-        # Save current state
+        # Save current state (wait longer for large save states like CD32/Amiga)
         log_debug(f"Saving state to slot {slot}...")
         self.retroarch.save_state(slot)
-        time.sleep(0.3)  # Give time for save
+        time.sleep(2.0)  # Give time for save to complete before suspending RetroArch
 
         # Display hint
         log_debug("Displaying hint image...")

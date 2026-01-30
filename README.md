@@ -66,14 +66,29 @@ Copy the example config:
 cp /userdata/system/ai-hints/config.example.json /userdata/system/ai-hints/config.json
 ```
 
-### 2. Add your API key
+### 2. Add your API key (secure method)
 
-Edit the config:
+Run the secure setup script:
 ```bash
-nano /userdata/system/ai-hints/config.json
+/userdata/system/ai-hints/setup-api-key.sh
 ```
 
-Change `"api_key": "YOUR_API_KEY_HERE"` to your actual API key.
+This prompts for your key (hidden input) and stores it in a secure `.secrets` file with restricted permissions. Your key is never stored in config.json.
+
+**Alternative methods (in order of security):**
+
+1. **Environment variable** (most secure):
+   ```bash
+   export ANTHROPIC_API_KEY="your-key-here"
+   ```
+
+2. **Secrets file** (secure - used by setup script):
+   ```bash
+   echo "API_KEY=your-key-here" > /userdata/system/ai-hints/.secrets
+   chmod 600 /userdata/system/ai-hints/.secrets
+   ```
+
+3. ~~Config file~~ (not recommended - can be accidentally shared)
 
 ### 3. Configure your controller (if needed)
 

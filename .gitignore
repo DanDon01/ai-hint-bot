@@ -214,16 +214,19 @@ __marimo__/
 secrets.json
 *.secret
 .api_key
+.secrets
 
 # Local config with API keys (use config.example.json as template)
 src/config.local.json
 config.local.json
+config.json
 
 # Logs
 *.log
 daemon.log
 usage.log
 usage_counter.json
+logs/
 
 # Generated hints (can be large)
 current-hint.png

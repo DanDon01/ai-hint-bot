@@ -1,6 +1,6 @@
 {
   "api_provider": "anthropic",
-  "api_key": "YOUR_API_KEY_HERE",
+  "api_key": "",
   "model": "claude-sonnet-4-20250514",
   "daily_limit": 10,
   "hotkey_request": ["BTN_SELECT", "BTN_TL"],
