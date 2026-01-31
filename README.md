@@ -1,15 +1,28 @@
-# Batocera AI Hint System
+# Batocera In-Game Hint System
 
-A background daemon for Batocera that provides on-demand AI-powered hints for retro games. Press a hotkey while stuck, get a contextual hint from Claude or GPT-4 based on your current screenshot.
+Ever get stuck in a retro game and have to pause, quit, or grab your phone to look up a guide?
+
+This project adds an **optional, on-demand hint system** to Batocera.  
+While playing, press a hotkey and get a **contextual hint based on your current screen** — then return straight back to your game.
+
+No exiting. No alt-tabbing. No spoilers unless you ask for them.
+
+Hints are generated using Claude or GPT-4, but everything is designed to feel like a natural part of the retro experience.
+
+---
 
 ## How It Works
 
-1. Player gets stuck in a game
-2. Press **Select + L1** to request a hint
-3. System captures screenshot and sends to AI in background
-4. When ready, notification appears: "Hint Ready!"
-5. Press **Select + R1** to view the hint
-6. Game savestates, hint displays fullscreen, press any button to return
+1. You get stuck during gameplay  
+2. Press **Select + L1** to request a hint  
+3. The system quietly captures a screenshot and analyzes it in the background  
+4. A notification appears: **“Hint Ready”**  
+5. Press **Select + R1** to view the hint  
+6. The game savestates, the hint is shown fullscreen, then one button press takes you right back
+
+The goal is to help without breaking immersion.
+
+---
 
 ## Requirements
 
