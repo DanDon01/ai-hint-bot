@@ -18,6 +18,16 @@ A background daemon for Batocera that provides on-demand AI-powered hints for re
 - **API Key** from [Anthropic](https://console.anthropic.com/) or [OpenAI](https://platform.openai.com/)
 - **SSH access** to your Batocera system
 
+## Screen Shots & Video
+
+![Generating Hint! ](screenshots/Screenshot1.png)
+
+![Hint Ready! ](screenshots/Screenshot2.png)
+
+![Displaying Hint! ](screenshots/Screenshot3.png)
+
+https://github.com/user-attachments/assets/54003885-90ae-4c35-b815-4366eca7345d
+
 ## Quick Install
 
 ### From Windows (PowerShell)
