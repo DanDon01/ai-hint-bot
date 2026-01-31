@@ -215,6 +215,7 @@ secrets.json
 *.secret
 .api_key
 .secrets
+batocera-ai-hint-system-plan.md
 
 # Local config with API keys (use config.example.json as template)
 src/config.local.json
