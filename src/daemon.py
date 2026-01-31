@@ -42,7 +42,7 @@ DEFAULT_CONFIG = {
     "api_provider": "anthropic",  # "anthropic" or "openai"
     "api_key": "",
     "model": "claude-sonnet-4-20250514",
-    "daily_limit": 10,  # Maximum API calls per day (0 = unlimited)
+    "daily_limit": 15,  # Maximum API calls per day (0 = unlimited)
     "hotkey_request": ["BTN_SELECT", "BTN_TL"],
     "hotkey_view": ["BTN_SELECT", "BTN_TR"],
     "controller_device": "/dev/input/event0",
@@ -55,21 +55,32 @@ DEFAULT_CONFIG = {
     "notification_generating": "Generating hint...",
     "notification_error": "Hint failed. Try again.",
     "notification_limit_reached": "Daily limit reached! ({used}/{limit})",
-    "prompt_template": """You are helping a player who is stuck in a retro video game.
+    "prompt_template": """You are an expert retro game guide helping a stuck player.
 
 System: {system}
 Game: {game}
 
-Based on the screenshot, provide a brief, spoiler-minimal hint about what to do next.
-- Keep it to 2-3 sentences maximum
-- Be specific to what's visible on screen
-- Don't reveal major plot points or surprises
-- Focus on the immediate obstacle or puzzle
+{system_context}
+
+You are an expert on retro games. You have a screenshot from the game.
+Analyze the screenshot carefully to determine the player's current location, situation, inventory (if visible), and any obstacles or puzzles shown.
+- What the player needs to do at THIS specific point
+
+Based on your detailed knowledge of the game's mechanics, levels, items, and progression, provide a specific, actionable hint on exactly what to do next to progress past this point. 
+Focus on precise steps involving game-specific elements like using a particular item on an object, a button combination, a hidden path, or interacting with the environment in a unique way. 
+Do not give generic advice like “explore more” or “talk to NPCs” - instead, be direct and spoiler-minimal, e.g., “Use the pipe as a crowbar on the locked door.”
+
+Keep it to 2-3 sentences. Don't spoil major plot twists, but DO be specific about the immediate puzzle or obstacle.
 
 Provide only the hint text, no preamble.""",
-    "hint_font_size": 32,
-    "hint_bg_color": [32, 32, 32],
-    "hint_text_color": [255, 255, 255],
+    # V2 Modern Dark visual style
+    "hint_font_size": 36,
+    "hint_bg_color": [26, 26, 46],          # #1a1a2e - Dark blue-gray
+    "hint_text_color": [234, 234, 234],     # #eaeaea - Soft white
+    "hint_accent_color": [100, 149, 237],   # #6495ed - Cornflower blue
+    "hint_header_color": [150, 150, 170],   # Muted purple-gray
+    "hint_footer_color": [100, 100, 120],   # Darker gray
+    "hint_card_color": [35, 35, 55],        # Slightly lighter than bg
     "hint_width": 1280,
     "hint_height": 720,
     "debug": False
@@ -327,7 +338,7 @@ def log_usage(event_type: str, game: str, system: str, success: bool, **kwargs):
 class RateLimiter:
     """Track and enforce daily API usage limits"""
 
-    def __init__(self, hints_dir: str, daily_limit: int = 10):
+    def __init__(self, hints_dir: str, daily_limit: int = 15):
         self.hints_dir = Path(hints_dir)
         self.daily_limit = daily_limit
         self.usage_file = self.hints_dir / "usage_counter.json"
@@ -539,11 +550,20 @@ class ScreenshotManager:
         # Trigger capture
         self.retroarch.screenshot()
 
-        # Wait a moment for file to be written
-        time.sleep(0.5)
+        # Give RetroArch a moment to start writing the file
+        time.sleep(0.15)
 
-        # Find the newest PNG in screenshot directory
-        return self.find_latest(after_time=before - 1)
+        # Poll for new file (must be created AFTER the screenshot command)
+        for _ in range(8):  # 8 x 50ms = 400ms additional polling
+            time.sleep(0.05)
+            result = self.find_latest(after_time=before)
+            # Verify file has content (not still being written)
+            if result and result.stat().st_size > 1000:
+                return result
+
+        # Final check with original timing as fallback
+        time.sleep(0.2)
+        return self.find_latest(after_time=before)
 
     def find_latest(self, after_time: float = 0) -> Path:
         """Find the most recent screenshot file"""
@@ -569,6 +589,54 @@ class ScreenshotManager:
 
 class GameInfoParser:
     """Extract system and game information from RetroArch status"""
+
+    # System-specific save state delays (seconds)
+    # Larger systems like Amiga/PlayStation need more time for save states
+    SAVE_STATE_DELAYS = {
+        "Amiga": 2.0,
+        "PlayStation": 1.5,
+        "Dreamcast": 1.5,
+        "Saturn": 1.5,
+        "N64": 1.0,
+        "DOS": 1.0,
+        "ScummVM": 1.0,
+        "SNES": 0.5,
+        "Genesis": 0.4,
+        "NES": 0.3,
+        "Game Boy": 0.3,
+        "GBA": 0.4,
+        "Atari 2600": 0.2,
+        "Atari 7800": 0.2,
+        "Atari ST": 1.0,
+        "C64": 0.5,
+        "Arcade": 0.5,
+        "X68000": 1.0,
+        "PC-88": 0.5,
+        "PC-98": 0.5,
+    }
+    DEFAULT_SAVE_DELAY = 1.0
+
+    # System-specific context for AI prompts
+    SYSTEM_CONTEXT = {
+        "Amiga": "This is likely a point-and-click adventure or action game. Amiga games often require pixel hunting and combining inventory items.",
+        "ScummVM": "This is a classic point-and-click adventure game. Look for interactive objects and consider inventory combinations.",
+        "DOS": "This is a DOS-era PC game. Check for keyboard shortcuts and look for subtle environmental clues.",
+        "NES": "This is an 8-bit NES game. Gameplay is typically straightforward - look for patterns and try different approaches.",
+        "SNES": "This is a 16-bit SNES game. Check for hidden passages and try interacting with the environment.",
+        "PlayStation": "This is a PlayStation game. Look for visual cues and explore the environment thoroughly.",
+        "N64": "This is an N64 game. Use the camera to look around and check for interactive elements.",
+        "Game Boy": "This is a Game Boy game with limited screen space. Everything visible is likely important.",
+        "GBA": "This is a GBA game. Look for subtle visual hints and try different abilities.",
+        "Genesis": "This is a Sega Genesis game. Fast-paced gameplay - look for patterns and timing.",
+        "Dreamcast": "This is a Dreamcast game. Explore thoroughly and check for context-sensitive actions.",
+        "Saturn": "This is a Sega Saturn game. Look for hidden items and explore every area.",
+        "Arcade": "This is an arcade game. Pattern recognition and timing are key. Watch enemy movements.",
+        "C64": "This is a Commodore 64 game. Try keyboard commands and experiment with interactions.",
+        "Atari ST": "This is an Atari ST game, often similar to Amiga versions. Look for interactive elements.",
+        "Atari 2600": "This is an Atari 2600 game. Simple mechanics - focus on timing and patterns.",
+        "Atari 7800": "This is an Atari 7800 game. Look for power-ups and pattern-based gameplay.",
+    }
+    DEFAULT_CONTEXT = "Analyze what's on screen and provide guidance for progression."
 
     # Map core names to system names
     CORE_TO_SYSTEM = {
@@ -658,8 +726,17 @@ class AIClient:
         with open(screenshot_path, "rb") as f:
             image_data = base64.b64encode(f.read()).decode("utf-8")
 
-        # Build prompt
-        prompt = self.config["prompt_template"].format(system=system, game=game)
+        # Get system-specific context for better hints
+        system_context = GameInfoParser.SYSTEM_CONTEXT.get(
+            system, GameInfoParser.DEFAULT_CONTEXT
+        )
+
+        # Build prompt with system context
+        prompt = self.config["prompt_template"].format(
+            system=system,
+            game=game,
+            system_context=system_context
+        )
 
         if self.provider == "anthropic":
             return self._call_anthropic(image_data, prompt)
@@ -786,7 +863,7 @@ class AIClient:
 # =============================================================================
 
 class HintRenderer:
-    """Render hint text as an image"""
+    """Render hint text as an image with V2 Modern Dark styling"""
 
     def __init__(self, config: Config):
         self.config = config
@@ -795,6 +872,11 @@ class HintRenderer:
         self.bg_color = tuple(config["hint_bg_color"])
         self.text_color = tuple(config["hint_text_color"])
         self.font_size = config["hint_font_size"]
+        # V2 styling colors
+        self.accent_color = tuple(config.get("hint_accent_color", [100, 149, 237]))
+        self.header_color = tuple(config.get("hint_header_color", [150, 150, 170]))
+        self.footer_color = tuple(config.get("hint_footer_color", [100, 100, 120]))
+        self.card_color = tuple(config.get("hint_card_color", [35, 35, 55]))
 
     def render(self, hint_text: str, game: str, system: str) -> Path:
         """Render hint text to PNG image, return path"""
@@ -828,11 +910,12 @@ class HintRenderer:
         return result
 
     def _render_pil(self, hint_text: str, game: str, system: str, output_path: Path) -> Path:
-        """Render using PIL/Pillow"""
+        """Render using PIL/Pillow with V2 Modern Dark card-style layout"""
         img = Image.new("RGB", (self.width, self.height), self.bg_color)
         draw = ImageDraw.Draw(img)
 
         # Try to load a font, fall back to default
+        font_path = None
         try:
             # Try common Linux font paths
             font_paths = [
@@ -844,44 +927,61 @@ class HintRenderer:
             for fp in font_paths:
                 if os.path.exists(fp):
                     font = ImageFont.truetype(fp, self.font_size)
+                    font_path = fp
                     break
             if font is None:
                 font = ImageFont.load_default()
         except:
             font = ImageFont.load_default()
 
-        # Draw header
-        header = f"{system} - {game}"
-        header_font_size = int(self.font_size * 0.8)
+        # Card layout dimensions
+        card_margin = 60
+        card_padding = 30
+        card_top = 80
+        card_bottom = self.height - 70
+        card_bounds = [card_margin, card_top, self.width - card_margin, card_bottom]
+
+        # Draw card background with rounded rectangle and accent border
         try:
-            header_font = ImageFont.truetype(font.path, header_font_size) if hasattr(font, 'path') else font
+            draw.rounded_rectangle(card_bounds, radius=20,
+                                  fill=self.card_color,
+                                  outline=self.accent_color, width=2)
+        except AttributeError:
+            # Older PIL without rounded_rectangle - draw regular rectangle
+            draw.rectangle(card_bounds, fill=self.card_color, outline=self.accent_color, width=2)
+
+        # Draw header above card
+        header = f"{system}  -  {game}"
+        header_font_size = int(self.font_size * 0.7)
+        try:
+            header_font = ImageFont.truetype(font_path, header_font_size) if font_path else font
         except:
             header_font = font
+        draw.text((card_margin, 35), header, fill=self.header_color, font=header_font)
 
-        draw.text((40, 30), header, fill=(180, 180, 180), font=header_font)
-
-        # Word wrap the hint text
-        margin = 40
-        max_width = self.width - (margin * 2)
+        # Word wrap the hint text for card interior
+        text_margin = card_margin + card_padding
+        max_width = (self.width - card_margin * 2) - (card_padding * 2)
         lines = self._wrap_text(hint_text, font, max_width, draw)
 
-        # Draw hint text centered vertically
-        line_height = self.font_size + 10
+        # Draw hint text inside card, centered vertically
+        line_height = self.font_size + 16  # V2: More line spacing
         total_height = len(lines) * line_height
-        y_start = (self.height - total_height) // 2
+        card_interior_height = card_bottom - card_top - (card_padding * 2)
+        y_start = card_top + card_padding + (card_interior_height - total_height) // 2
 
         for i, line in enumerate(lines):
             y = y_start + (i * line_height)
-            draw.text((margin, y), line, fill=self.text_color, font=font)
+            draw.text((text_margin, y), line, fill=self.text_color, font=font)
 
-        # Draw footer instruction
-        footer = "Press any button to return to game"
-        footer_font_size = int(self.font_size * 0.6)
+        # Draw footer below card
+        footer = "Press any button to continue"
+        footer_font_size = int(self.font_size * 0.5)
         try:
-            footer_font = ImageFont.truetype(font.path, footer_font_size) if hasattr(font, 'path') else font
+            footer_font = ImageFont.truetype(font_path, footer_font_size) if font_path else font
         except:
             footer_font = font
-        draw.text((40, self.height - 50), footer, fill=(120, 120, 120), font=footer_font)
+        draw.text((card_margin, self.height - 45), footer, fill=self.footer_color, font=footer_font)
 
         img.save(output_path, "PNG")
         log(f"Hint image saved to {output_path}")
@@ -1720,6 +1820,7 @@ class HintSystem:
 
         self.hint_ready = False
         self.current_hint_path = None
+        self.current_system = None  # V2: Track system for save state delay
         self.processing = False
 
         log_event("HintSystem initialized successfully")
@@ -1836,6 +1937,7 @@ class HintSystem:
 
             # Mark ready
             self.current_hint_path = hint_path
+            self.current_system = system  # V2: Store for system-aware delay
             self.hint_ready = True
             self.processing = False
 
@@ -1880,10 +1982,14 @@ class HintSystem:
         slot = self.config["savestate_slot"]
         view_start = time.time()
 
-        # Save current state (wait longer for large save states like CD32/Amiga)
-        log_debug(f"Saving state to slot {slot}...")
+        # V2: Use system-aware save state delay
+        save_delay = GameInfoParser.SAVE_STATE_DELAYS.get(
+            self.current_system,
+            GameInfoParser.DEFAULT_SAVE_DELAY
+        )
+        log_debug(f"Saving state to slot {slot}...", system=self.current_system, delay=save_delay)
         self.retroarch.save_state(slot)
-        time.sleep(2.0)  # Give time for save to complete before suspending RetroArch
+        time.sleep(save_delay)  # System-aware delay for save to complete
 
         # Display hint
         log_debug("Displaying hint image...")
